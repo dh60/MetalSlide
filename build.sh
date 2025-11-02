@@ -7,7 +7,7 @@ rm -rf ChaCha.app
 mkdir -p ChaCha.app/Contents/MacOS
 
 # Compile the Swift code
-swiftc ChaCha.swift -o ChaCha.app/Contents/MacOS/ChaCha -framework SwiftUI -framework Metal -framework MetalKit -parse-as-library
+swiftc ChaCha.swift -o ChaCha.app/Contents/MacOS/ChaCha -framework SwiftUI -framework Metal -framework MetalKit -framework MetalFX -parse-as-library
 
 # Create Info.plist
 cat << EOF > ChaCha.app/Contents/Info.plist
@@ -32,3 +32,5 @@ cat << EOF > ChaCha.app/Contents/Info.plist
 </dict>
 </plist>
 EOF
+
+echo "Build complete!"

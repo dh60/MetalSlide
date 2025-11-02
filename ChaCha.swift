@@ -90,6 +90,7 @@ struct MetalView: NSViewRepresentable {
         view.framebufferOnly = false
         view.isPaused = true
         view.enableSetNeedsDisplay = true
+        view.layer?.contentsScale = NSScreen.main?.backingScaleFactor ?? 2.0
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             context.coordinator.handleKey(event)
             return nil
@@ -132,35 +133,42 @@ class Renderer: NSObject, MTKViewDelegate {
         lastIndex = state.currentIndex
 
         let url = state.imagePaths[state.currentIndex]
-        let image = NSImage(contentsOf: url)!
-        let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil)!
-        imageSize = CGSize(width: cgImage.width, height: cgImage.height)
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let cgImage = CGImageSourceCreateImageAtIndex(src, 0, nil) else { return }
 
-        let textureDesc = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .rgba8Unorm,
-            width: cgImage.width,
-            height: cgImage.height,
-            mipmapped: false
-        )
-        textureDesc.usage = [.shaderRead]
-        texture = device.makeTexture(descriptor: textureDesc)!
+        let width = cgImage.width
+        let height = cgImage.height
+        imageSize = CGSize(width: width, height: height)
 
-        let bytesPerRow = cgImage.width * 4
-        let context = CGContext(
-            data: nil,
-            width: cgImage.width,
-            height: cgImage.height,
+        var data = [UInt8](repeating: 0, count: width * height * 4)
+        let bytesPerRow = width * 4
+        let ctx = CGContext(
+            data: &data,
+            width: width,
+            height: height,
             bitsPerComponent: 8,
             bytesPerRow: bytesPerRow,
-            space: CGColorSpaceCreateDeviceRGB(),
+            space: cgImage.colorSpace ?? CGColorSpaceCreateDeviceRGB(),
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         )!
-        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: cgImage.width, height: cgImage.height))
+        ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+
+        if texture == nil || texture!.width != width || texture!.height != height {
+            let textureDesc = MTLTextureDescriptor.texture2DDescriptor(
+                pixelFormat: .rgba8Unorm,
+                width: width,
+                height: height,
+                mipmapped: false
+            )
+            textureDesc.usage = [.shaderRead]
+            texture = device.makeTexture(descriptor: textureDesc)!
+        }
+
         texture!.replace(
             region: MTLRegion(origin: MTLOrigin(x: 0, y: 0, z: 0),
-                             size: MTLSize(width: cgImage.width, height: cgImage.height, depth: 1)),
+                             size: MTLSize(width: width, height: height, depth: 1)),
             mipmapLevel: 0,
-            withBytes: context.data!,
+            withBytes: data,
             bytesPerRow: bytesPerRow
         )
 
@@ -237,16 +245,10 @@ class Renderer: NSObject, MTKViewDelegate {
 
         let viewportWidth = CGFloat(drawable.texture.width)
         let viewportHeight = CGFloat(drawable.texture.height)
-        let imageAspect = imageSize.width / imageSize.height
-        let viewportAspect = viewportWidth / viewportHeight
 
-        var scaleX: Float = 1.0
-        var scaleY: Float = 1.0
-        if imageAspect > viewportAspect {
-            scaleY = Float(viewportAspect / imageAspect)
-        } else {
-            scaleX = Float(imageAspect / viewportAspect)
-        }
+        // Render at actual pixel size (no upscaling/downscaling)
+        let scaleX = Float(imageSize.width / viewportWidth)
+        let scaleY = Float(imageSize.height / viewportHeight)
 
         let scalePtr = scaleBuffer.contents().assumingMemoryBound(to: Float.self)
         scalePtr[0] = scaleX

@@ -60,6 +60,7 @@ class Renderer: NSObject, MTKViewDelegate {
     var scalerOutput: MTLTexture?
     var lastViewportSize = CGSize.zero
     var scalerFence: MTLFence!
+    var commandBuffer: MTL4CommandBuffer!
 
     func initializeMetal(_ view: MTKView) {
         device = view.device
@@ -104,6 +105,7 @@ class Renderer: NSObject, MTKViewDelegate {
         residencySet = try! device.makeResidencySet(descriptor: MTLResidencySetDescriptor())
         allocator = device.makeCommandAllocator()
         scalerFence = device.makeFence()
+        commandBuffer = device.makeCommandBuffer()
     }
 
     func updateTexture() {
@@ -215,7 +217,6 @@ class Renderer: NSObject, MTKViewDelegate {
         argumentTable.setAddress(scaleBuffer.gpuAddress, index: 0)
 
         allocator.reset()
-        let commandBuffer = device.makeCommandBuffer()!
         commandBuffer.beginCommandBuffer(allocator: allocator)
         commandBuffer.useResidencySet(residencySet)
 

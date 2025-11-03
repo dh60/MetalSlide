@@ -185,6 +185,12 @@ class Renderer: NSObject, MTKViewDelegate {
             setupScaler(viewportSize: viewportSize)
         }
 
+        let imageAspect = imageSize.width / imageSize.height
+        let viewportAspect = viewportSize.width / viewportSize.height
+        let fitSize = imageAspect > viewportAspect
+            ? CGSize(width: viewportSize.width, height: viewportSize.width / imageAspect)
+            : CGSize(width: viewportSize.height * imageAspect, height: viewportSize.height)
+
         let (renderTexture, renderSize): (MTLTexture, CGSize)
         if let scaler = spatialScaler, let output = scalerOutput {
             scaler.colorTexture = inputTexture
@@ -193,7 +199,7 @@ class Renderer: NSObject, MTKViewDelegate {
             scaler.inputContentHeight = inputTexture.height
             (renderTexture, renderSize) = (output, CGSize(width: output.width, height: output.height))
         } else {
-            (renderTexture, renderSize) = (inputTexture, imageSize)
+            (renderTexture, renderSize) = (inputTexture, fitSize)
         }
 
         let scalePtr = scaleBuffer.contents().assumingMemoryBound(to: Float.self)

@@ -25,12 +25,9 @@ struct MetalView: NSViewRepresentable {
             .map { $0 as! URL }
             .filter { ["jpg", "jpeg", "png"].contains($0.pathExtension) }
             .shuffled()
-
         let view = MTKView()
         view.device = MTLCreateSystemDefaultDevice()
         view.delegate = context.coordinator
-        view.isPaused = true
-        view.enableSetNeedsDisplay = true
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) {
             context.coordinator.handleKey($0)
             return nil
@@ -44,8 +41,9 @@ struct MetalView: NSViewRepresentable {
 }
 
 class Renderer: NSObject, MTKViewDelegate {
-    var currentIndex = 0
     var imagePaths: [URL] = []
+    var currentIndex = 0
+    var lastIndex = -1
     var device: MTLDevice!
     var queue: MTL4CommandQueue!
     var pipeline: MTLRenderPipelineState!
@@ -53,7 +51,6 @@ class Renderer: NSObject, MTKViewDelegate {
     var argumentTable: MTL4ArgumentTable!
     var residencySet: MTLResidencySet!
     var texture: MTLTexture?
-    var lastIndex = -1
     weak var view: MTKView?
     var scaleBuffer: MTLBuffer!
     var imageSize = CGSize.zero
@@ -132,7 +129,6 @@ class Renderer: NSObject, MTKViewDelegate {
 
         texture?.replace(region: MTLRegion(origin: MTLOrigin(), size: MTLSize(width: width, height: height, depth: 1)),
                         mipmapLevel: 0, withBytes: data, bytesPerRow: width * 4)
-        view?.needsDisplay = true
     }
 
     func setupScaler(viewportSize: CGSize) {
@@ -238,16 +234,12 @@ class Renderer: NSObject, MTKViewDelegate {
         case 53: NSApp.terminate(nil)
         case 123:
             currentIndex = (currentIndex - 1 + imagePaths.count) % imagePaths.count
-            view?.needsDisplay = true
         case 124, 49:
             currentIndex = (currentIndex + 1) % imagePaths.count
-            view?.needsDisplay = true
         case 51:
             try? FileManager.default.trashItem(at: imagePaths[currentIndex], resultingItemURL: nil)
-            imagePaths.remove(at: currentIndex)
-            if imagePaths.isEmpty { NSApp.terminate(nil) }
-            if currentIndex >= imagePaths.count { currentIndex = 0 }
-            view?.needsDisplay = true
+            currentIndex = (currentIndex + 1) % imagePaths.count
+            imagePaths.remove(at: currentIndex - 1)
         default: break
         }
     }

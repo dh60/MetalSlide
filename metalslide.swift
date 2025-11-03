@@ -67,11 +67,13 @@ class Renderer: NSObject, MTKViewDelegate {
     var preloadedScalers: [Int: (MTL4FXSpatialScaler, MTLTexture)] = [:]
     var preloadQueue = DispatchQueue(label: "preload", qos: .userInitiated)
     var pipelineReady = false
+    var textureLoader: MTKTextureLoader!
 
     func initializeMetal(_ view: MTKView) {
         device = view.device
         queue = device.makeMTL4CommandQueue()
         compiler = try! device.makeCompiler(descriptor: MTL4CompilerDescriptor())
+        textureLoader = MTKTextureLoader(device: device)
 
         let tableDesc = MTL4ArgumentTableDescriptor()
         tableDesc.maxTextureBindCount = 1
@@ -156,22 +158,12 @@ class Renderer: NSObject, MTKViewDelegate {
     }
 
     func loadTexture(index: Int) -> MTLTexture? {
-        guard let src = CGImageSourceCreateWithURL(imagePaths[index] as CFURL, nil),
-              let cgImage = CGImageSourceCreateImageAtIndex(src, 0, [kCGImageSourceShouldAllowFloat: true] as CFDictionary) else { return nil }
-
-        let (width, height) = (cgImage.width, cgImage.height)
-        var data = [UInt8](repeating: 0, count: width * height * 4)
-        let context = CGContext(data: &data, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
-                  space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
-        context.interpolationQuality = .none
-        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: width, height: height))
-
-        let desc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: width, height: height, mipmapped: false)
-        desc.usage = .shaderRead
-        guard let tex = device.makeTexture(descriptor: desc) else { return nil }
-        tex.replace(region: MTLRegion(origin: MTLOrigin(), size: MTLSize(width: width, height: height, depth: 1)),
-                   mipmapLevel: 0, withBytes: data, bytesPerRow: width * 4)
-        return tex
+        let options: [MTKTextureLoader.Option: Any] = [
+            .textureUsage: MTLTextureUsage.shaderRead.rawValue,
+            .textureStorageMode: MTLStorageMode.private.rawValue,
+            .SRGB: false
+        ]
+        return try? textureLoader.newTexture(URL: imagePaths[index], options: options)
     }
 
     func preloadAdjacentImages() {

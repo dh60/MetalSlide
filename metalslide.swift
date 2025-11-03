@@ -4,9 +4,9 @@ import MetalKit
 import MetalFX
 
 @main
-struct ChaCha: App {
+struct MetalSlide: App {
     var body: some Scene {
-        Window("ChaCha", id: "main") {
+        Window("MetalSlide", id: "main") {
             MetalView()
         }
     }

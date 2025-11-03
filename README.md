@@ -3,7 +3,7 @@ MetalSlide is a minimalist slideshow app for MacOS that uses Metal for high qual
 
 ## Features
 - Displays photos from a folder of your choice in shuffled order.
-- Full Metal 4 pipeline for native rendering without any OS scaling.
+- Asynchronous Metal 4 pipeline for fast processing and native rendering without any OS scaling. 
 - MetalFX upscaling, Lanczos-3 downscaling.
 - Can delete photos from within the slideshow.
 

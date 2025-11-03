@@ -1,5 +1,5 @@
 # MetalSlide
-MetalSlide is a minimalist slideshow app for MacOS that uses Metal 4 and MetalFX for high quality viewing of images.
+MetalSlide is a minimalist slideshow app for macOS that uses Metal 4 and MetalFX for high quality viewing of images.
 ![MetalSlide User Interface](demo.png)
 
 ## Features
@@ -16,3 +16,7 @@ MetalSlide is a minimalist slideshow app for MacOS that uses Metal 4 and MetalFX
 - Delete = Trash Image
 - i = View Info
 - Esc = Exit
+
+## Requirements
+- macOS 26+
+- Apple Silicon

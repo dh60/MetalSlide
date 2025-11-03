@@ -29,11 +29,14 @@ struct MetalView: NSViewRepresentable {
         let view = MTKView()
         view.device = MTLCreateSystemDefaultDevice()
         view.delegate = context.coordinator
+        view.isPaused = true
+        view.enableSetNeedsDisplay = true
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) {
             context.coordinator.handleKey($0)
             return nil
         }
         context.coordinator.view = view
+        view.needsDisplay = true
         return view
     }
 
@@ -235,17 +238,27 @@ class Renderer: NSObject, MTKViewDelegate {
         drawable.present()
     }
 
-    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
+    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
+        view.needsDisplay = true
+    }
 
     func handleKey(_ event: NSEvent) {
         switch event.keyCode {
         case 53: NSApp.terminate(nil)
         case 123:
             currentIndex = (currentIndex - 1 + imagePaths.count) % imagePaths.count
+            view?.needsDisplay = true
         case 124, 49:
             currentIndex = (currentIndex + 1) % imagePaths.count
+            view?.needsDisplay = true
         case 51:
             try? FileManager.default.trashItem(at: imagePaths[currentIndex], resultingItemURL: nil)
+            imagePaths.remove(at: currentIndex)
+            if currentIndex >= imagePaths.count {
+                currentIndex = 0
+            }
+            lastIndex = -1
+            view?.needsDisplay = true
         default: break
         }
     }

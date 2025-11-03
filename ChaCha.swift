@@ -29,7 +29,6 @@ struct MetalView: NSViewRepresentable {
         let view = MTKView()
         view.device = MTLCreateSystemDefaultDevice()
         view.delegate = context.coordinator
-        view.framebufferOnly = false
         view.isPaused = true
         view.enableSetNeedsDisplay = true
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) {

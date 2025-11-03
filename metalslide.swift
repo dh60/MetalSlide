@@ -12,8 +12,26 @@ struct MetalSlide: App {
     }
 }
 
-struct MetalView: NSViewRepresentable {
-    func makeCoordinator() -> Renderer { Renderer() }
+struct MetalView: View {
+    @StateObject private var renderer = Renderer()
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            MetalViewRepresentable(renderer: renderer)
+            if renderer.showInfo {
+                Text(renderer.info)
+                    .background(Color.black.opacity(0.5))
+                    .cornerRadius(4)
+                    .padding(12)
+            }
+        }
+    }
+}
+
+struct MetalViewRepresentable: NSViewRepresentable {
+    let renderer: Renderer
+
+    func makeCoordinator() -> Renderer { renderer }
 
     func makeNSView(context: Context) -> MTKView {
         let panel = NSOpenPanel()
@@ -44,13 +62,14 @@ struct MetalView: NSViewRepresentable {
     }
 }
 
-class Renderer: NSObject, MTKViewDelegate {
+class Renderer: NSObject, MTKViewDelegate, ObservableObject {
     var imagePaths: [URL] = []
     var currentIndex = 0
     var lastIndex = -1
     var device: MTLDevice!
     var queue: MTL4CommandQueue!
-    var pipeline: MTLRenderPipelineState?
+    var upscalePipeline: MTLRenderPipelineState?
+    var downscalePipeline: MTLRenderPipelineState?
     var allocator: MTL4CommandAllocator!
     var argumentTable: MTL4ArgumentTable!
     var residencySet: MTLResidencySet!
@@ -68,6 +87,8 @@ class Renderer: NSObject, MTKViewDelegate {
     var preloadQueue = DispatchQueue(label: "preload", qos: .userInitiated)
     var pipelineReady = false
     var textureLoader: MTKTextureLoader!
+    @Published var info = ""
+    @Published var showInfo = false
 
     func initializeMetal(_ view: MTKView) {
         device = view.device
@@ -96,6 +117,11 @@ class Renderer: NSObject, MTKViewDelegate {
                 return { float4(positions[vid] * scale, 0, 1), texCoords[vid] };
             }
 
+            fragment half4 passthroughFragment(VertexOut in [[stage_in]], texture2d<half> tex [[texture(0)]]) {
+                constexpr sampler s(coord::normalized, address::clamp_to_edge, filter::linear);
+                return tex.sample(s, in.texCoord);
+            }
+
             float lanczos(float x, float a) {
                 if (x == 0.0) return 1.0;
                 if (abs(x) >= a) return 0.0;
@@ -103,7 +129,7 @@ class Renderer: NSObject, MTKViewDelegate {
                 return (a * sin(pi_x) * sin(pi_x / a)) / (pi_x * pi_x);
             }
 
-            fragment half4 fragmentShader(VertexOut in [[stage_in]], texture2d<half> tex [[texture(0)]]) {
+            fragment half4 lanczosFragment(VertexOut in [[stage_in]], texture2d<half> tex [[texture(0)]]) {
                 float2 texSize = float2(tex.get_width(), tex.get_height());
                 float2 texelPos = in.texCoord * texSize;
 
@@ -138,18 +164,31 @@ class Renderer: NSObject, MTKViewDelegate {
             vertDesc.name = "vertexShader"
             vertDesc.library = library
 
-            let fragDesc = MTL4LibraryFunctionDescriptor()
-            fragDesc.name = "fragmentShader"
-            fragDesc.library = library
+            let passthroughFragDesc = MTL4LibraryFunctionDescriptor()
+            passthroughFragDesc.name = "passthroughFragment"
+            passthroughFragDesc.library = library
 
-            let pipelineDesc = MTL4RenderPipelineDescriptor()
-            pipelineDesc.vertexFunctionDescriptor = vertDesc
-            pipelineDesc.fragmentFunctionDescriptor = fragDesc
-            pipelineDesc.colorAttachments[0].pixelFormat = view.colorPixelFormat
+            let lanczosFragDesc = MTL4LibraryFunctionDescriptor()
+            lanczosFragDesc.name = "lanczosFragment"
+            lanczosFragDesc.library = library
+
+            let upscalePipelineDesc = MTL4RenderPipelineDescriptor()
+            upscalePipelineDesc.vertexFunctionDescriptor = vertDesc
+            upscalePipelineDesc.fragmentFunctionDescriptor = passthroughFragDesc
+            upscalePipelineDesc.colorAttachments[0].pixelFormat = view.colorPixelFormat
+
+            let downscalePipelineDesc = MTL4RenderPipelineDescriptor()
+            downscalePipelineDesc.vertexFunctionDescriptor = vertDesc
+            downscalePipelineDesc.fragmentFunctionDescriptor = lanczosFragDesc
+            downscalePipelineDesc.colorAttachments[0].pixelFormat = view.colorPixelFormat
 
             Task {
+                async let upscale = try self.compiler.makeRenderPipelineState(descriptor: upscalePipelineDesc)
+                async let downscale = try self.compiler.makeRenderPipelineState(descriptor: downscalePipelineDesc)
+
                 do {
-                    self.pipeline = try await self.compiler.makeRenderPipelineState(descriptor: pipelineDesc)
+                    self.upscalePipeline = try await upscale
+                    self.downscalePipeline = try await downscale
                     self.pipelineReady = true
                     await MainActor.run { self.view?.needsDisplay = true }
                 } catch {}
@@ -240,13 +279,13 @@ class Renderer: NSObject, MTKViewDelegate {
         guard !imagePaths.isEmpty else { return }
 
         if !pipelineReady {
-            if pipeline == nil { initializeMetal(view) }
+            if upscalePipeline == nil { initializeMetal(view) }
             return
         }
 
         updateTexture()
 
-        guard let drawable = view.currentDrawable, let inputTexture = texture, let pipeline = pipeline else { return }
+        guard let drawable = view.currentDrawable, let inputTexture = texture else { return }
 
         let viewportSize = CGSize(width: drawable.texture.width, height: drawable.texture.height)
         let imageAspect = CGFloat(inputTexture.width) / CGFloat(inputTexture.height)
@@ -283,16 +322,22 @@ class Renderer: NSObject, MTKViewDelegate {
             }
         }
 
-        let renderTexture: MTLTexture
-        if let scaler = spatialScaler, let output = scalerOutput {
+        let useMetalFX = spatialScaler != nil && scalerOutput != nil
+        let renderTexture = useMetalFX ? scalerOutput! : inputTexture
+        let pipeline = useMetalFX ? upscalePipeline! : downscalePipeline!
+
+        if useMetalFX, let scaler = spatialScaler {
             scaler.colorTexture = inputTexture
-            scaler.outputTexture = output
+            scaler.outputTexture = renderTexture
             scaler.inputContentWidth = inputTexture.width
             scaler.inputContentHeight = inputTexture.height
-            renderTexture = output
-        } else {
-            renderTexture = inputTexture
         }
+
+        let scalingMode = useMetalFX ? "Upscale: MetalFX" : "Downscale: Lanczos"
+        let inputRes = "\(inputTexture.width)x\(inputTexture.height)"
+        let outputRes = "\(Int(fitSize.width))x\(Int(fitSize.height))"
+        let fileName = imagePaths[currentIndex].lastPathComponent
+        info = "File: \(fileName)\nInput: \(inputRes)\nOutput: \(outputRes)\n\(scalingMode)"
 
         let scale = scaleBuffer.contents().assumingMemoryBound(to: Float.self)
         (scale[0], scale[1]) = (Float(fitSize.width / viewportSize.width), Float(fitSize.height / viewportSize.height))
@@ -300,7 +345,7 @@ class Renderer: NSObject, MTKViewDelegate {
         residencySet.removeAllAllocations()
         residencySet.addAllocation(inputTexture)
         residencySet.addAllocation(scaleBuffer)
-        scalerOutput.map { residencySet.addAllocation($0) }
+        if useMetalFX { residencySet.addAllocation(renderTexture) }
         residencySet.commit()
 
         argumentTable.setTexture(renderTexture.gpuResourceID, index: 0)
@@ -309,10 +354,10 @@ class Renderer: NSObject, MTKViewDelegate {
         commandBuffer.beginCommandBuffer(allocator: allocator)
         commandBuffer.useResidencySet(residencySet)
 
-        spatialScaler?.encode(commandBuffer: commandBuffer)
+        if useMetalFX { spatialScaler?.encode(commandBuffer: commandBuffer) }
 
         let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: view.currentMTL4RenderPassDescriptor!, options: MTL4RenderEncoderOptions())!
-        if spatialScaler != nil { encoder.waitForFence(scalerFence, beforeEncoderStages: .fragment) }
+        if useMetalFX { encoder.waitForFence(scalerFence, beforeEncoderStages: .fragment) }
         encoder.setRenderPipelineState(pipeline)
         encoder.setArgumentTable(argumentTable, stages: [.vertex, .fragment])
         encoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 6)
@@ -332,6 +377,7 @@ class Renderer: NSObject, MTKViewDelegate {
     func handleKey(_ event: NSEvent) {
         switch event.keyCode {
         case 53: NSApp.terminate(nil)
+        case 34: showInfo.toggle()
         case 123:
             currentIndex = (currentIndex - 1 + imagePaths.count) % imagePaths.count
             view?.needsDisplay = true

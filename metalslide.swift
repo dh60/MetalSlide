@@ -57,7 +57,6 @@ class Renderer: NSObject, MTKViewDelegate {
     var texture: MTLTexture?
     weak var view: MTKView?
     var scaleBuffer: MTLBuffer!
-    var imageSize = CGSize.zero
     var compiler: MTL4Compiler!
     var spatialScaler: MTL4FXSpatialScaler?
     var scalerOutput: MTLTexture?
@@ -150,8 +149,6 @@ class Renderer: NSObject, MTKViewDelegate {
 
         lastIndex = currentIndex
         let (width, height) = (cgImage.width, cgImage.height)
-        imageSize = CGSize(width: width, height: height)
-
         var data = [UInt8](repeating: 0, count: width * height * 4)
         let context = CGContext(data: &data, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
                   space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
@@ -169,41 +166,6 @@ class Renderer: NSObject, MTKViewDelegate {
                         mipmapLevel: 0, withBytes: data, bytesPerRow: width * 4)
     }
 
-    func setupScaler(viewportSize: CGSize) {
-        guard let inputTexture = texture else { return }
-
-        let imageAspect = imageSize.width / imageSize.height
-        let viewportAspect = viewportSize.width / viewportSize.height
-        let (outputWidth, outputHeight) = imageAspect > viewportAspect
-            ? (Int(viewportSize.width), Int(viewportSize.width / imageAspect))
-            : (Int(viewportSize.height * imageAspect), Int(viewportSize.height))
-
-        guard outputWidth > inputTexture.width || outputHeight > inputTexture.height else {
-            spatialScaler = nil
-            scalerOutput = nil
-            return
-        }
-
-        let desc = MTLFXSpatialScalerDescriptor()
-        desc.inputWidth = inputTexture.width
-        desc.inputHeight = inputTexture.height
-        desc.outputWidth = outputWidth
-        desc.outputHeight = outputHeight
-        desc.colorTextureFormat = .rgba8Unorm
-        desc.outputTextureFormat = .rgba8Unorm
-        desc.colorProcessingMode = .perceptual
-
-        guard MTLFXSpatialScalerDescriptor.supportsDevice(device),
-              let scaler = desc.makeSpatialScaler(device: device, compiler: compiler) else { return }
-
-        scaler.fence = scalerFence
-        spatialScaler = scaler
-
-        let outDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: outputWidth, height: outputHeight, mipmapped: false)
-        outDesc.usage = scaler.outputTextureUsage
-        scalerOutput = device.makeTexture(descriptor: outDesc)
-    }
-
     func draw(in view: MTKView) {
         guard !imagePaths.isEmpty else { return }
 
@@ -216,17 +178,39 @@ class Renderer: NSObject, MTKViewDelegate {
         guard let drawable = view.currentDrawable, let inputTexture = texture else { return }
 
         let viewportSize = CGSize(width: drawable.texture.width, height: drawable.texture.height)
-
-        if spatialScaler == nil || lastViewportSize != viewportSize {
-            lastViewportSize = viewportSize
-            setupScaler(viewportSize: viewportSize)
-        }
-
-        let imageAspect = imageSize.width / imageSize.height
+        let imageAspect = CGFloat(inputTexture.width) / CGFloat(inputTexture.height)
         let viewportAspect = viewportSize.width / viewportSize.height
         let fitSize = imageAspect > viewportAspect
             ? CGSize(width: viewportSize.width, height: viewportSize.width / imageAspect)
             : CGSize(width: viewportSize.height * imageAspect, height: viewportSize.height)
+
+        if spatialScaler == nil || lastViewportSize != viewportSize {
+            lastViewportSize = viewportSize
+            let (outputWidth, outputHeight) = (Int(fitSize.width), Int(fitSize.height))
+
+            if outputWidth > inputTexture.width || outputHeight > inputTexture.height,
+               MTLFXSpatialScalerDescriptor.supportsDevice(device) {
+                let desc = MTLFXSpatialScalerDescriptor()
+                desc.inputWidth = inputTexture.width
+                desc.inputHeight = inputTexture.height
+                desc.outputWidth = outputWidth
+                desc.outputHeight = outputHeight
+                desc.colorTextureFormat = .rgba8Unorm
+                desc.outputTextureFormat = .rgba8Unorm
+                desc.colorProcessingMode = .perceptual
+
+                if let scaler = desc.makeSpatialScaler(device: device, compiler: compiler) {
+                    scaler.fence = scalerFence
+                    spatialScaler = scaler
+                    let outDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: outputWidth, height: outputHeight, mipmapped: false)
+                    outDesc.usage = scaler.outputTextureUsage
+                    scalerOutput = device.makeTexture(descriptor: outDesc)
+                }
+            } else {
+                spatialScaler = nil
+                scalerOutput = nil
+            }
+        }
 
         let renderTexture: MTLTexture
         if let scaler = spatialScaler, let output = scalerOutput {
@@ -239,13 +223,13 @@ class Renderer: NSObject, MTKViewDelegate {
             renderTexture = inputTexture
         }
 
-        let scalePtr = scaleBuffer.contents().assumingMemoryBound(to: Float.self)
-        (scalePtr[0], scalePtr[1]) = (Float(fitSize.width / viewportSize.width), Float(fitSize.height / viewportSize.height))
+        let scale = scaleBuffer.contents().assumingMemoryBound(to: Float.self)
+        (scale[0], scale[1]) = (Float(fitSize.width / viewportSize.width), Float(fitSize.height / viewportSize.height))
 
         residencySet.removeAllAllocations()
         residencySet.addAllocation(inputTexture)
-        scalerOutput.map { residencySet.addAllocation($0) }
         residencySet.addAllocation(scaleBuffer)
+        scalerOutput.map { residencySet.addAllocation($0) }
         residencySet.commit()
 
         argumentTable.setTexture(renderTexture.gpuResourceID, index: 0)

@@ -31,4 +31,6 @@ cat << EOF > MetalSlide.app/Contents/Info.plist
 </plist>
 EOF
 
+codesign --force --deep --sign - MetalSlide.app
+
 echo "Build complete!"

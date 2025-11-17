@@ -54,16 +54,14 @@ struct MetalViewRepresentable: NSViewRepresentable {
                 .shuffled()
             view.needsDisplay = true
         }
-        NSEvent.addLocalMonitorForEvents(matching: .keyDown) {
-            context.coordinator.handleKey($0)
-            return nil
-        }
+        let r = context.coordinator
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { r.handleKey($0); return nil }
         Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
-            if context.coordinator.autoadvanceInterval > 0 &&
-               Date().timeIntervalSince(context.coordinator.slideChangedTime) >= Double(context.coordinator.autoadvanceInterval) {
-                context.coordinator.currentIndex = (context.coordinator.currentIndex + 1) % context.coordinator.imagePaths.count
-                context.coordinator.slideChangedTime = Date()
-                context.coordinator.view?.needsDisplay = true
+            if r.autoadvanceInterval > 0 && Date().timeIntervalSince(r.slideChangedTime) >= Double(r.autoadvanceInterval) {
+                r.currentIndex = (r.currentIndex + 1) % r.imagePaths.count
+                r.textureDirty = true
+                r.slideChangedTime = Date()
+                r.view?.needsDisplay = true
             }
         }
         return view
@@ -75,7 +73,7 @@ struct MetalViewRepresentable: NSViewRepresentable {
 class Renderer: NSObject, MTKViewDelegate, ObservableObject {
     var imagePaths: [URL] = []
     var currentIndex = 0
-    var lastIndex = -1
+    var textureDirty = true
     var device: MTLDevice!
     var queue: MTL4CommandQueue!
     var upscalePipeline: MTLRenderPipelineState?
@@ -87,12 +85,9 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
     weak var view: MTKView?
     var scaleBuffer: MTLBuffer!
     var compiler: MTL4Compiler!
-    var spatialScaler: MTL4FXSpatialScaler?
-    var scalerOutput: MTLTexture?
+    var scaler: (MTL4FXSpatialScaler, MTLTexture)?
     var scalerFence: MTLFence!
     var commandBuffer: MTL4CommandBuffer!
-    var pipelineReady = false
-    var textureLoader: MTKTextureLoader!
     @Published var info = ""
     @Published var showInfo = false
     var autoadvanceInterval = 0
@@ -102,7 +97,6 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
         device = view.device
         queue = device.makeMTL4CommandQueue()
         compiler = try! device.makeCompiler(descriptor: MTL4CompilerDescriptor())
-        textureLoader = MTKTextureLoader(device: device)
 
         let tableDesc = MTL4ArgumentTableDescriptor()
         tableDesc.maxTextureBindCount = 1
@@ -178,7 +172,6 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
             Task {
                 self.upscalePipeline = try? await self.compiler.makeRenderPipelineState(descriptor: upscaleDesc)
                 self.downscalePipeline = try? await self.compiler.makeRenderPipelineState(descriptor: downscaleDesc)
-                self.pipelineReady = true
                 await MainActor.run { self.view?.needsDisplay = true }
             }
         }
@@ -187,33 +180,32 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
     func draw(in view: MTKView) {
         guard !imagePaths.isEmpty else { return }
 
-        if !pipelineReady {
-            if upscalePipeline == nil { initializeMetal(view) }
+        if upscalePipeline == nil {
+            initializeMetal(view)
             return
         }
 
-        if lastIndex != currentIndex {
-            lastIndex = currentIndex
-            texture = try? textureLoader.newTexture(URL: imagePaths[currentIndex], options: [
+        if textureDirty {
+            textureDirty = false
+            texture = try? MTKTextureLoader(device: device).newTexture(URL: imagePaths[currentIndex], options: [
                 .textureUsage: MTLTextureUsage.shaderRead.rawValue,
                 .textureStorageMode: MTLStorageMode.private.rawValue,
                 .SRGB: false
             ])
-            spatialScaler = nil
+            scaler = nil
         }
 
         guard let drawable = view.currentDrawable, let inputTexture = texture else { return }
 
         let viewportSize = CGSize(width: drawable.texture.width, height: drawable.texture.height)
         let imageAspect = CGFloat(inputTexture.width) / CGFloat(inputTexture.height)
-        let viewportAspect = viewportSize.width / viewportSize.height
-        let fitSize = imageAspect > viewportAspect
+        let fitSize = imageAspect > viewportSize.width / viewportSize.height
             ? CGSize(width: viewportSize.width, height: viewportSize.width / imageAspect)
             : CGSize(width: viewportSize.height * imageAspect, height: viewportSize.height)
         let (outputWidth, outputHeight) = (Int(fitSize.width), Int(fitSize.height))
 
         if outputWidth > inputTexture.width || outputHeight > inputTexture.height {
-            if spatialScaler == nil && MTLFXSpatialScalerDescriptor.supportsDevice(device) {
+            if scaler == nil && MTLFXSpatialScalerDescriptor.supportsDevice(device) {
                 let desc = MTLFXSpatialScalerDescriptor()
                 desc.inputWidth = inputTexture.width
                 desc.inputHeight = inputTexture.height
@@ -223,29 +215,28 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
                 desc.outputTextureFormat = .rgba8Unorm
                 desc.colorProcessingMode = .perceptual
 
-                if let scaler = desc.makeSpatialScaler(device: device, compiler: compiler) {
-                    scaler.fence = scalerFence
-                    spatialScaler = scaler
+                if let s = desc.makeSpatialScaler(device: device, compiler: compiler) {
+                    s.fence = scalerFence
                     let outDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: outputWidth, height: outputHeight, mipmapped: false)
-                    outDesc.usage = scaler.outputTextureUsage
-                    scalerOutput = device.makeTexture(descriptor: outDesc)
+                    outDesc.usage = s.outputTextureUsage
+                    scaler = (s, device.makeTexture(descriptor: outDesc)!)
                 }
             }
         } else {
-            spatialScaler = nil
+            scaler = nil
         }
 
-        if let scaler = spatialScaler, let output = scalerOutput {
-            scaler.colorTexture = inputTexture
-            scaler.outputTexture = output
-            scaler.inputContentWidth = inputTexture.width
-            scaler.inputContentHeight = inputTexture.height
+        if let (s, output) = scaler {
+            s.colorTexture = inputTexture
+            s.outputTexture = output
+            s.inputContentWidth = inputTexture.width
+            s.inputContentHeight = inputTexture.height
         }
 
-        let renderTexture = spatialScaler != nil ? scalerOutput! : inputTexture
-        let pipeline = spatialScaler != nil ? upscalePipeline! : downscalePipeline!
+        let renderTexture = scaler?.1 ?? inputTexture
+        let pipeline = scaler != nil ? upscalePipeline! : downscalePipeline!
 
-        info = "Slide: \(currentIndex + 1) of \(imagePaths.count)\nFile: \(imagePaths[currentIndex].lastPathComponent)\nInput: \(inputTexture.width)x\(inputTexture.height)\nOutput: \(outputWidth)x\(outputHeight)\n\(spatialScaler != nil ? "Upscale: MetalFX" : "Downscale: Lanczos")"
+        info = "Slide: \(currentIndex + 1) of \(imagePaths.count)\nFile: \(imagePaths[currentIndex].lastPathComponent)\nInput: \(inputTexture.width)x\(inputTexture.height)\nOutput: \(outputWidth)x\(outputHeight)\n\(scaler != nil ? "Upscale: MetalFX" : "Downscale: Lanczos")"
 
         let scale = scaleBuffer.contents().assumingMemoryBound(to: Float.self)
         (scale[0], scale[1]) = (Float(fitSize.width / viewportSize.width), Float(fitSize.height / viewportSize.height))
@@ -253,7 +244,7 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
         residencySet.removeAllAllocations()
         residencySet.addAllocation(inputTexture)
         residencySet.addAllocation(scaleBuffer)
-        if renderTexture !== inputTexture { residencySet.addAllocation(renderTexture) }
+        if let (_, output) = scaler { residencySet.addAllocation(output) }
         residencySet.commit()
 
         argumentTable.setTexture(renderTexture.gpuResourceID, index: 0)
@@ -261,10 +252,10 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
 
         commandBuffer.beginCommandBuffer(allocator: allocator)
         commandBuffer.useResidencySet(residencySet)
-        spatialScaler?.encode(commandBuffer: commandBuffer)
+        scaler?.0.encode(commandBuffer: commandBuffer)
 
         let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: view.currentMTL4RenderPassDescriptor!, options: MTL4RenderEncoderOptions())!
-        if spatialScaler != nil { encoder.waitForFence(scalerFence, beforeEncoderStages: .fragment) }
+        if scaler != nil { encoder.waitForFence(scalerFence, beforeEncoderStages: .fragment) }
         encoder.setRenderPipelineState(pipeline)
         encoder.setArgumentTable(argumentTable, stages: [.vertex, .fragment])
         encoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 6)
@@ -287,13 +278,14 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
         case 34: showInfo.toggle()
         case 123, 124, 49: // left, right, space
             currentIndex = (currentIndex + (event.keyCode == 123 ? -1 + imagePaths.count : 1)) % imagePaths.count
+            textureDirty = true
             slideChangedTime = Date()
             view?.needsDisplay = true
         case 51: // delete
             try? FileManager.default.trashItem(at: imagePaths[currentIndex], resultingItemURL: nil)
             imagePaths.remove(at: currentIndex)
             if currentIndex >= imagePaths.count { currentIndex = 0 }
-            lastIndex = -1
+            textureDirty = true
             slideChangedTime = Date()
             view?.needsDisplay = true
         case 29, 18, 19, 20, 21, 23, 22, 26, 28, 25: // 0-9

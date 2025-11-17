@@ -89,6 +89,8 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
     var textureLoader: MTKTextureLoader!
     @Published var info = ""
     @Published var showInfo = false
+    var autoadvanceTimer: Timer?
+    var autoadvanceInterval = 0
 
     func initializeMetal(_ view: MTKView) {
         device = view.device
@@ -370,6 +372,17 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
         view.needsDisplay = true
     }
 
+    func resetAutoadvanceTimer() {
+        autoadvanceTimer?.invalidate()
+        if autoadvanceInterval > 0 {
+            autoadvanceTimer = Timer.scheduledTimer(withTimeInterval: Double(autoadvanceInterval), repeats: true) { [weak self] _ in
+                guard let self = self else { return }
+                self.currentIndex = (self.currentIndex + 1) % self.imagePaths.count
+                self.view?.needsDisplay = true
+            }
+        }
+    }
+
     func handleKey(_ event: NSEvent) {
         switch event.keyCode {
         case 53: NSApp.terminate(nil)
@@ -377,9 +390,11 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
         case 123:
             currentIndex = (currentIndex - 1 + imagePaths.count) % imagePaths.count
             view?.needsDisplay = true
+            resetAutoadvanceTimer()
         case 124, 49:
             currentIndex = (currentIndex + 1) % imagePaths.count
             view?.needsDisplay = true
+            resetAutoadvanceTimer()
         case 51:
             try? FileManager.default.trashItem(at: imagePaths[currentIndex], resultingItemURL: nil)
             imagePaths.remove(at: currentIndex)
@@ -388,6 +403,11 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
             }
             lastIndex = -1
             view?.needsDisplay = true
+            resetAutoadvanceTimer()
+        case 29, 18, 19, 20, 21, 23, 22, 26, 28, 25: // 0-9 keys
+            let keyMap: [UInt16: Int] = [29: 0, 18: 1, 19: 2, 20: 3, 21: 4, 23: 5, 22: 6, 26: 7, 28: 8, 25: 9]
+            autoadvanceInterval = keyMap[event.keyCode]!
+            resetAutoadvanceTimer()
         default: break
         }
     }

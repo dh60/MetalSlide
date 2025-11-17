@@ -19,10 +19,14 @@ struct MetalView: View {
         ZStack(alignment: .topLeading) {
             MetalViewRepresentable(renderer: renderer)
             if renderer.showInfo {
-                Text(renderer.info)
-                    .padding()
-                    .glassEffect(in: .rect(cornerRadius: 30))
-                    .padding()
+                VStack(alignment: .leading) {
+                    Text(renderer.info)
+                    Toggle("Scaling", isOn: $renderer.scalingEnabled)
+                        .onChange(of: renderer.scalingEnabled) { renderer.view?.needsDisplay = true }
+                }
+                .padding()
+                .glassEffect(in: .rect(cornerRadius: 30))
+                .padding()
             }
         }
     }
@@ -90,6 +94,7 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
     var commandBuffer: MTL4CommandBuffer!
     @Published var info = ""
     @Published var showInfo = false
+    @Published var scalingEnabled = true
     var autoadvanceInterval = 0
     var slideChangedTime = Date()
 
@@ -124,26 +129,52 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
                 return tex.sample(s, in.texCoord);
             }
 
-            float lanczos(float x, float a) {
-                if (x == 0.0) return 1.0;
-                if (abs(x) >= a) return 0.0;
-                float pi_x = M_PI_F * x;
-                return (a * sin(pi_x) * sin(pi_x / a)) / (pi_x * pi_x);
+            float bessel_j1(float x) {
+                float ax = abs(x);
+                if (ax < 8.0) {
+                    float y = x * x;
+                    float ans1 = x * (72362614232.0 + y * (-7895059235.0 + y * (242396853.1
+                        + y * (-2972611.439 + y * (15704.48260 + y * (-30.16036606))))));
+                    float ans2 = 144725228442.0 + y * (2300535178.0 + y * (18583304.74
+                        + y * (99447.43394 + y * (376.9991397 + y * 1.0))));
+                    return ans1 / ans2;
+                } else {
+                    float z = 8.0 / ax;
+                    float y = z * z;
+                    float xx = ax - 2.356194491;
+                    float ans1 = 1.0 + y * (0.183105e-2 + y * (-0.3516396496e-4
+                        + y * (0.2457520174e-5 + y * (-0.240337019e-6))));
+                    float ans2 = 0.04687499995 + y * (-0.2002690873e-3
+                        + y * (0.8449199096e-5 + y * (-0.88228987e-6 + y * 0.105787412e-6)));
+                    float ans = sqrt(0.636619772 / ax) * (cos(xx) * ans1 - z * sin(xx) * ans2);
+                    return x < 0.0 ? -ans : ans;
+                }
             }
 
-            fragment half4 lanczosFragment(VertexOut in [[stage_in]], texture2d<half> tex [[texture(0)]]) {
+            float jinc(float x) {
+                if (x < 0.0001) return 1.0;
+                float pi_x = M_PI_F * x;
+                return 2.0 * bessel_j1(pi_x) / pi_x;
+            }
+
+            fragment half4 jincFragment(VertexOut in [[stage_in]], texture2d<half> tex [[texture(0)]]) {
                 float2 texSize = float2(tex.get_width(), tex.get_height());
                 float2 texelPos = in.texCoord * texSize;
                 half4 color = half4(0.0);
                 float totalWeight = 0.0;
-                for (int y = -3; y <= 3; y++) {
-                    for (int x = -3; x <= 3; x++) {
+                const int radius = 4;
+                const float windowRadius = 4.0;
+                for (int y = -radius; y <= radius; y++) {
+                    for (int x = -radius; x <= radius; x++) {
                         float2 centerPos = floor(texelPos) + float2(x, y) + 0.5;
                         float2 delta = texelPos - centerPos;
-                        float weight = lanczos(delta.x, 3.0) * lanczos(delta.y, 3.0);
-                        constexpr sampler s(coord::normalized, address::clamp_to_edge, filter::nearest);
-                        color += tex.sample(s, centerPos / texSize) * weight;
-                        totalWeight += weight;
+                        float dist = length(delta);
+                        if (dist < windowRadius) {
+                            float weight = jinc(dist) * jinc(dist / windowRadius);
+                            constexpr sampler s(coord::normalized, address::clamp_to_edge, filter::nearest);
+                            color += tex.sample(s, centerPos / texSize) * weight;
+                            totalWeight += weight;
+                        }
                     }
                 }
                 return color / totalWeight;
@@ -166,7 +197,7 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
 
             let downscaleDesc = MTL4RenderPipelineDescriptor()
             downscaleDesc.vertexFunctionDescriptor = vertDesc
-            downscaleDesc.fragmentFunctionDescriptor = { let d = MTL4LibraryFunctionDescriptor(); d.name = "lanczosFragment"; d.library = library; return d }()
+            downscaleDesc.fragmentFunctionDescriptor = { let d = MTL4LibraryFunctionDescriptor(); d.name = "jincFragment"; d.library = library; return d }()
             downscaleDesc.colorAttachments[0].pixelFormat = view.colorPixelFormat
 
             Task {
@@ -202,28 +233,38 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
         let fitSize = imageAspect > viewportSize.width / viewportSize.height
             ? CGSize(width: viewportSize.width, height: viewportSize.width / imageAspect)
             : CGSize(width: viewportSize.height * imageAspect, height: viewportSize.height)
-        let (outputWidth, outputHeight) = (Int(fitSize.width), Int(fitSize.height))
 
-        if outputWidth > inputTexture.width || outputHeight > inputTexture.height {
-            if scaler == nil && MTLFXSpatialScalerDescriptor.supportsDevice(device) {
-                let desc = MTLFXSpatialScalerDescriptor()
-                desc.inputWidth = inputTexture.width
-                desc.inputHeight = inputTexture.height
-                desc.outputWidth = outputWidth
-                desc.outputHeight = outputHeight
-                desc.colorTextureFormat = .rgba8Unorm
-                desc.outputTextureFormat = .rgba8Unorm
-                desc.colorProcessingMode = .perceptual
+        var scalingMode = ""
+        var displaySize: CGSize
+        if scalingEnabled {
+            displaySize = fitSize
+            let (outputWidth, outputHeight) = (Int(fitSize.width), Int(fitSize.height))
+            if outputWidth > inputTexture.width || outputHeight > inputTexture.height {
+                if scaler == nil && MTLFXSpatialScalerDescriptor.supportsDevice(device) {
+                    let desc = MTLFXSpatialScalerDescriptor()
+                    desc.inputWidth = inputTexture.width
+                    desc.inputHeight = inputTexture.height
+                    desc.outputWidth = outputWidth
+                    desc.outputHeight = outputHeight
+                    desc.colorTextureFormat = .rgba8Unorm
+                    desc.outputTextureFormat = .rgba8Unorm
+                    desc.colorProcessingMode = .perceptual
 
-                if let s = desc.makeSpatialScaler(device: device, compiler: compiler) {
-                    s.fence = scalerFence
-                    let outDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: outputWidth, height: outputHeight, mipmapped: false)
-                    outDesc.usage = s.outputTextureUsage
-                    scaler = (s, device.makeTexture(descriptor: outDesc)!)
+                    if let s = desc.makeSpatialScaler(device: device, compiler: compiler) {
+                        s.fence = scalerFence
+                        let outDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: outputWidth, height: outputHeight, mipmapped: false)
+                        outDesc.usage = s.outputTextureUsage
+                        scaler = (s, device.makeTexture(descriptor: outDesc)!)
+                    }
                 }
+                scalingMode = "\nUpscaling: MetalFX"
+            } else {
+                scaler = nil
+                scalingMode = "\nDownscaling: Jinc"
             }
         } else {
             scaler = nil
+            displaySize = CGSize(width: inputTexture.width, height: inputTexture.height)
         }
 
         if let (s, output) = scaler {
@@ -234,12 +275,12 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
         }
 
         let renderTexture = scaler?.1 ?? inputTexture
-        let pipeline = scaler != nil ? upscalePipeline! : downscalePipeline!
+        let pipeline = scalingEnabled && scaler == nil ? downscalePipeline! : upscalePipeline!
 
-        info = "Slide: \(currentIndex + 1) of \(imagePaths.count)\nFile: \(imagePaths[currentIndex].lastPathComponent)\nInput: \(inputTexture.width)x\(inputTexture.height)\nOutput: \(outputWidth)x\(outputHeight)\n\(scaler != nil ? "Upscale: MetalFX" : "Downscale: Lanczos")"
+        info = "Slide: \(currentIndex + 1) of \(imagePaths.count)\nFile: \(imagePaths[currentIndex].lastPathComponent)\nInput: \(inputTexture.width)x\(inputTexture.height)\nOutput: \(Int(displaySize.width))x\(Int(displaySize.height))\(scalingMode)"
 
         let scale = scaleBuffer.contents().assumingMemoryBound(to: Float.self)
-        (scale[0], scale[1]) = (Float(fitSize.width / viewportSize.width), Float(fitSize.height / viewportSize.height))
+        (scale[0], scale[1]) = (Float(displaySize.width / viewportSize.width), Float(displaySize.height / viewportSize.height))
 
         residencySet.removeAllAllocations()
         residencySet.addAllocation(inputTexture)

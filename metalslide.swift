@@ -23,6 +23,8 @@ struct MetalView: View {
                     Text(renderer.info)
                     Toggle("Scaling", isOn: $renderer.scalingEnabled)
                         .onChange(of: renderer.scalingEnabled) { renderer.view?.needsDisplay = true }
+                    Toggle("Shuffle", isOn: $renderer.shuffleEnabled)
+                        .onChange(of: renderer.shuffleEnabled) { renderer.toggleShuffle() }
                 }
                 .padding()
                 .glassEffect(in: .rect(cornerRadius: 30))
@@ -92,6 +94,7 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
     @Published var info = ""
     @Published var showInfo = false
     @Published var scalingEnabled = true
+    @Published var shuffleEnabled = true
     var autoadvanceInterval = 0
     var slideChangedTime = Date()
 
@@ -320,4 +323,12 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
         slideChangedTime = Date()
         view?.needsDisplay = true
     }
+
+    func toggleShuffle() {
+        let currentPath = imagePaths[currentIndex]
+        imagePaths = shuffleEnabled ? imagePaths.shuffled() : imagePaths.sorted { $0.path < $1.path }
+        currentIndex = imagePaths.firstIndex(of: currentPath)!
+    }
 }
+
+

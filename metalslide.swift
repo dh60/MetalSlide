@@ -34,27 +34,39 @@ struct MetalViewRepresentable: NSViewRepresentable {
     func makeCoordinator() -> Renderer { renderer }
 
     func makeNSView(context: Context) -> MTKView {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.runModal()
-        let url = panel.url!
-        context.coordinator.imagePaths = FileManager.default.enumerator(at: url, includingPropertiesForKeys: nil)!.allObjects
-            .map { $0 as! URL }
-            .filter { ["jpg", "jpeg", "png"].contains($0.pathExtension) }
-            .shuffled()
-        context.coordinator.lastIndex = -1
         let view = MTKView()
         view.device = MTLCreateSystemDefaultDevice()
         view.delegate = context.coordinator
         view.isPaused = true
         view.enableSetNeedsDisplay = true
+        context.coordinator.view = view
+        DispatchQueue.main.async {
+            let panel = NSOpenPanel()
+            panel.canChooseDirectories = true
+            panel.canChooseFiles = false
+            guard panel.runModal() == .OK, let url = panel.url else {
+                NSApp.terminate(nil)
+                return
+            }
+            context.coordinator.imagePaths = FileManager.default.enumerator(at: url, includingPropertiesForKeys: nil)!.allObjects
+                .map { $0 as! URL }
+                .filter { ["jpg", "jpeg", "png"].contains($0.pathExtension) }
+                .shuffled()
+            context.coordinator.lastIndex = -1
+            view.needsDisplay = true
+        }
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) {
             context.coordinator.handleKey($0)
             return nil
         }
-        context.coordinator.view = view
-        view.needsDisplay = true
+        Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
+            if context.coordinator.autoadvanceInterval > 0 &&
+               Date().timeIntervalSince(context.coordinator.slideChangedTime) >= Double(context.coordinator.autoadvanceInterval) {
+                context.coordinator.currentIndex = (context.coordinator.currentIndex + 1) % context.coordinator.imagePaths.count
+                context.coordinator.slideChangedTime = Date()
+                context.coordinator.view?.needsDisplay = true
+            }
+        }
         return view
     }
 
@@ -89,8 +101,8 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
     var textureLoader: MTKTextureLoader!
     @Published var info = ""
     @Published var showInfo = false
-    var autoadvanceTimer: Timer?
     var autoadvanceInterval = 0
+    var slideChangedTime = Date()
 
     func initializeMetal(_ view: MTKView) {
         device = view.device
@@ -372,42 +384,27 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
         view.needsDisplay = true
     }
 
-    func resetAutoadvanceTimer() {
-        autoadvanceTimer?.invalidate()
-        if autoadvanceInterval > 0 {
-            autoadvanceTimer = Timer.scheduledTimer(withTimeInterval: Double(autoadvanceInterval), repeats: true) { [weak self] _ in
-                guard let self = self else { return }
-                self.currentIndex = (self.currentIndex + 1) % self.imagePaths.count
-                self.view?.needsDisplay = true
-            }
-        }
-    }
-
     func handleKey(_ event: NSEvent) {
         switch event.keyCode {
         case 53: NSApp.terminate(nil)
         case 34: showInfo.toggle()
         case 123:
             currentIndex = (currentIndex - 1 + imagePaths.count) % imagePaths.count
+            slideChangedTime = Date()
             view?.needsDisplay = true
-            resetAutoadvanceTimer()
         case 124, 49:
             currentIndex = (currentIndex + 1) % imagePaths.count
+            slideChangedTime = Date()
             view?.needsDisplay = true
-            resetAutoadvanceTimer()
         case 51:
             try? FileManager.default.trashItem(at: imagePaths[currentIndex], resultingItemURL: nil)
             imagePaths.remove(at: currentIndex)
-            if currentIndex >= imagePaths.count {
-                currentIndex = 0
-            }
+            if currentIndex >= imagePaths.count { currentIndex = 0 }
             lastIndex = -1
+            slideChangedTime = Date()
             view?.needsDisplay = true
-            resetAutoadvanceTimer()
         case 29, 18, 19, 20, 21, 23, 22, 26, 28, 25: // 0-9 keys
-            let keyMap: [UInt16: Int] = [29: 0, 18: 1, 19: 2, 20: 3, 21: 4, 23: 5, 22: 6, 26: 7, 28: 8, 25: 9]
-            autoadvanceInterval = keyMap[event.keyCode]!
-            resetAutoadvanceTimer()
+            autoadvanceInterval = [29: 0, 18: 1, 19: 2, 20: 3, 21: 4, 23: 5, 22: 6, 26: 7, 28: 8, 25: 9][event.keyCode]!
         default: break
         }
     }

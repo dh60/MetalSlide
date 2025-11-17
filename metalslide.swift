@@ -62,10 +62,7 @@ struct MetalViewRepresentable: NSViewRepresentable {
         NSEvent.addLocalMonitorForEvents(matching: .keyDown) { r.handleKey($0); return nil }
         Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
             if r.autoadvanceInterval > 0 && Date().timeIntervalSince(r.slideChangedTime) >= Double(r.autoadvanceInterval) {
-                r.currentIndex = (r.currentIndex + 1) % r.imagePaths.count
-                r.textureDirty = true
-                r.slideChangedTime = Date()
-                r.view?.needsDisplay = true
+                r.goToSlide(r.currentIndex + 1)
             }
         }
         return view
@@ -229,30 +226,27 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
         guard let drawable = view.currentDrawable, let inputTexture = texture else { return }
 
         let viewportSize = CGSize(width: drawable.texture.width, height: drawable.texture.height)
-        let imageAspect = CGFloat(inputTexture.width) / CGFloat(inputTexture.height)
-        let fitSize = imageAspect > viewportSize.width / viewportSize.height
-            ? CGSize(width: viewportSize.width, height: viewportSize.width / imageAspect)
-            : CGSize(width: viewportSize.height * imageAspect, height: viewportSize.height)
+        let fitSize = CGFloat(inputTexture.width) / CGFloat(inputTexture.height) > viewportSize.width / viewportSize.height
+            ? CGSize(width: viewportSize.width, height: viewportSize.width / CGFloat(inputTexture.width) * CGFloat(inputTexture.height))
+            : CGSize(width: viewportSize.height / CGFloat(inputTexture.height) * CGFloat(inputTexture.width), height: viewportSize.height)
 
         var scalingMode = ""
-        var displaySize: CGSize
+        let displaySize = scalingEnabled ? fitSize : CGSize(width: inputTexture.width, height: inputTexture.height)
         if scalingEnabled {
-            displaySize = fitSize
-            let (outputWidth, outputHeight) = (Int(fitSize.width), Int(fitSize.height))
-            if outputWidth > inputTexture.width || outputHeight > inputTexture.height {
+            if Int(fitSize.width) > inputTexture.width || Int(fitSize.height) > inputTexture.height {
                 if scaler == nil && MTLFXSpatialScalerDescriptor.supportsDevice(device) {
                     let desc = MTLFXSpatialScalerDescriptor()
                     desc.inputWidth = inputTexture.width
                     desc.inputHeight = inputTexture.height
-                    desc.outputWidth = outputWidth
-                    desc.outputHeight = outputHeight
+                    desc.outputWidth = Int(fitSize.width)
+                    desc.outputHeight = Int(fitSize.height)
                     desc.colorTextureFormat = .rgba8Unorm
                     desc.outputTextureFormat = .rgba8Unorm
                     desc.colorProcessingMode = .perceptual
 
                     if let s = desc.makeSpatialScaler(device: device, compiler: compiler) {
                         s.fence = scalerFence
-                        let outDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: outputWidth, height: outputHeight, mipmapped: false)
+                        let outDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: Int(fitSize.width), height: Int(fitSize.height), mipmapped: false)
                         outDesc.usage = s.outputTextureUsage
                         scaler = (s, device.makeTexture(descriptor: outDesc)!)
                     }
@@ -264,7 +258,6 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
             }
         } else {
             scaler = nil
-            displaySize = CGSize(width: inputTexture.width, height: inputTexture.height)
         }
 
         if let (s, output) = scaler {
@@ -274,13 +267,10 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
             s.inputContentHeight = inputTexture.height
         }
 
-        let renderTexture = scaler?.1 ?? inputTexture
-        let pipeline = scalingEnabled && scaler == nil ? downscalePipeline! : upscalePipeline!
-
         info = "Slide: \(currentIndex + 1) of \(imagePaths.count)\nFile: \(imagePaths[currentIndex].lastPathComponent)\nInput: \(inputTexture.width)x\(inputTexture.height)\nOutput: \(Int(displaySize.width))x\(Int(displaySize.height))\(scalingMode)"
 
-        let scale = scaleBuffer.contents().assumingMemoryBound(to: Float.self)
-        (scale[0], scale[1]) = (Float(displaySize.width / viewportSize.width), Float(displaySize.height / viewportSize.height))
+        scaleBuffer.contents().assumingMemoryBound(to: Float.self).pointee = Float(displaySize.width / viewportSize.width)
+        scaleBuffer.contents().assumingMemoryBound(to: Float.self).advanced(by: 1).pointee = Float(displaySize.height / viewportSize.height)
 
         residencySet.removeAllAllocations()
         residencySet.addAllocation(inputTexture)
@@ -288,7 +278,7 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
         if let (_, output) = scaler { residencySet.addAllocation(output) }
         residencySet.commit()
 
-        argumentTable.setTexture(renderTexture.gpuResourceID, index: 0)
+        argumentTable.setTexture((scaler?.1 ?? inputTexture).gpuResourceID, index: 0)
         argumentTable.setAddress(scaleBuffer.gpuAddress, index: 0)
 
         commandBuffer.beginCommandBuffer(allocator: allocator)
@@ -297,7 +287,7 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
 
         let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: view.currentMTL4RenderPassDescriptor!, options: MTL4RenderEncoderOptions())!
         if scaler != nil { encoder.waitForFence(scalerFence, beforeEncoderStages: .fragment) }
-        encoder.setRenderPipelineState(pipeline)
+        encoder.setRenderPipelineState(scalingEnabled && scaler == nil ? downscalePipeline! : upscalePipeline!)
         encoder.setArgumentTable(argumentTable, stages: [.vertex, .fragment])
         encoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 6)
         encoder.endEncoding()
@@ -317,21 +307,21 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
         switch event.keyCode {
         case 53: NSApp.terminate(nil)
         case 34: showInfo.toggle()
-        case 123, 124, 49: // left, right, space
-            currentIndex = (currentIndex + (event.keyCode == 123 ? -1 + imagePaths.count : 1)) % imagePaths.count
-            textureDirty = true
-            slideChangedTime = Date()
-            view?.needsDisplay = true
+        case 123: goToSlide(currentIndex - 1) // left
+        case 124, 49: goToSlide(currentIndex + 1) // right, space
         case 51: // delete
             try? FileManager.default.trashItem(at: imagePaths[currentIndex], resultingItemURL: nil)
             imagePaths.remove(at: currentIndex)
-            if currentIndex >= imagePaths.count { currentIndex = 0 }
-            textureDirty = true
-            slideChangedTime = Date()
-            view?.needsDisplay = true
-        case 29, 18, 19, 20, 21, 23, 22, 26, 28, 25: // 0-9
-            autoadvanceInterval = [29: 0, 18: 1, 19: 2, 20: 3, 21: 4, 23: 5, 22: 6, 26: 7, 28: 8, 25: 9][event.keyCode]!
+            goToSlide(currentIndex)
+        case 18...29: autoadvanceInterval = event.charactersIgnoringModifiers!.first!.wholeNumberValue ?? autoadvanceInterval
         default: break
         }
+    }
+
+    func goToSlide(_ index: Int) {
+        currentIndex = (index % imagePaths.count + imagePaths.count) % imagePaths.count
+        textureDirty = true
+        slideChangedTime = Date()
+        view?.needsDisplay = true
     }
 }

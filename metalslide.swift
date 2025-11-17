@@ -106,7 +106,7 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
         argumentTable = try! device.makeArgumentTable(descriptor: tableDesc)
 
         scaleBuffer = device.makeBuffer(length: 8, options: .storageModeShared)
-        residencySet = try! device.makeResidencySet(descriptor: MTLResidencySetDescriptor())
+        residencySet = try! device.makeResidencySet(descriptor: .init())
         allocator = device.makeCommandAllocator()
         scalerFence = device.makeFence()
         commandBuffer = device.makeCommandBuffer()
@@ -220,7 +220,6 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
                 .textureStorageMode: MTLStorageMode.private.rawValue,
                 .SRGB: false
             ])
-            scaler = nil
         }
 
         guard let drawable = view.currentDrawable, let inputTexture = texture else { return }
@@ -267,8 +266,7 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
 
         info = "Slide: \(currentIndex + 1) of \(imagePaths.count)\nFile: \(imagePaths[currentIndex].lastPathComponent)\nInput: \(inputTexture.width)x\(inputTexture.height)\nOutput: \(Int(displaySize.width))x\(Int(displaySize.height))\(scalingMode)"
 
-        scaleBuffer.contents().assumingMemoryBound(to: Float.self).pointee = Float(displaySize.width / viewportSize.width)
-        scaleBuffer.contents().assumingMemoryBound(to: Float.self).advanced(by: 1).pointee = Float(displaySize.height / viewportSize.height)
+        scaleBuffer.contents().assumingMemoryBound(to: SIMD2<Float>.self).pointee = SIMD2(Float(displaySize.width / viewportSize.width), Float(displaySize.height / viewportSize.height))
 
         residencySet.removeAllAllocations()
         residencySet.addAllocation(inputTexture)

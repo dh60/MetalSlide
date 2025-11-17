@@ -181,7 +181,7 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
         options.mathMode = .fast
 
         device.makeLibrary(source: shaderSource, options: options) { [weak self] library, _ in
-            guard let self = self, let library = library else { return }
+            guard let self = self else { return }
 
             let vertDesc = MTL4LibraryFunctionDescriptor()
             vertDesc.name = "vertexShader"
@@ -230,11 +230,12 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
             ? CGSize(width: viewportSize.width, height: viewportSize.width / CGFloat(inputTexture.width) * CGFloat(inputTexture.height))
             : CGSize(width: viewportSize.height / CGFloat(inputTexture.height) * CGFloat(inputTexture.width), height: viewportSize.height)
 
-        var scalingMode = ""
         let displaySize = scalingEnabled ? fitSize : CGSize(width: inputTexture.width, height: inputTexture.height)
+        var scalingMode = ""
+        scaler = nil
         if scalingEnabled {
             if Int(fitSize.width) > inputTexture.width || Int(fitSize.height) > inputTexture.height {
-                if scaler == nil && MTLFXSpatialScalerDescriptor.supportsDevice(device) {
+                if MTLFXSpatialScalerDescriptor.supportsDevice(device) {
                     let desc = MTLFXSpatialScalerDescriptor()
                     desc.inputWidth = inputTexture.width
                     desc.inputHeight = inputTexture.height
@@ -253,11 +254,8 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
                 }
                 scalingMode = "\nUpscaling: MetalFX"
             } else {
-                scaler = nil
                 scalingMode = "\nDownscaling: Jinc"
             }
-        } else {
-            scaler = nil
         }
 
         if let (s, output) = scaler {
@@ -286,14 +284,14 @@ class Renderer: NSObject, MTKViewDelegate, ObservableObject {
         scaler?.0.encode(commandBuffer: commandBuffer)
 
         let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: view.currentMTL4RenderPassDescriptor!, options: MTL4RenderEncoderOptions())!
-        if scaler != nil { encoder.waitForFence(scalerFence, beforeEncoderStages: .fragment) }
+        encoder.waitForFence(scalerFence, beforeEncoderStages: .fragment)
         encoder.setRenderPipelineState(scalingEnabled && scaler == nil ? downscalePipeline! : upscalePipeline!)
         encoder.setArgumentTable(argumentTable, stages: [.vertex, .fragment])
         encoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 6)
         encoder.endEncoding()
         commandBuffer.endCommandBuffer()
         queue.waitForDrawable(drawable)
-        queue.commit([commandBuffer], options: nil)
+        queue.commit([commandBuffer])
         queue.signalDrawable(drawable)
         drawable.present()
         allocator.reset()

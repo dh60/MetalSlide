@@ -9,6 +9,7 @@ struct MetalSlide: App {
         Window("MetalSlide", id: "main") {
             MetalView()
         }
+        .windowStyle(.hiddenTitleBar)
     }
 }
 
@@ -18,6 +19,7 @@ struct MetalView: View {
     var body: some View {
         ZStack(alignment: .topLeading) {
             MetalViewRepresentable(renderer: renderer)
+                .ignoresSafeArea()
             if renderer.showInfo {
                 VStack(alignment: .leading) {
                     Text(renderer.info)

@@ -28,9 +28,9 @@ struct MetalView: View {
                     Toggle("Shuffle", isOn: $renderer.shuffleEnabled)
                         .onChange(of: renderer.shuffleEnabled) { renderer.toggleShuffle() }
                 }
-                .padding()
+                .padding(15)
                 .glassEffect(in: .rect(cornerRadius: 30))
-                .padding()
+                .padding(.leading, 8)
             }
         }
     }

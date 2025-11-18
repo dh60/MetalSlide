@@ -41,7 +41,6 @@ struct MetalView: View {
         .onKeyPress(.leftArrow) { renderer.goToSlide(renderer.currentIndex - 1); return .handled }
         .onKeyPress(.rightArrow) { renderer.goToSlide(renderer.currentIndex + 1); return .handled }
         .onKeyPress(.delete) { renderer.deleteCurrentSlide(); return .handled }
-        .onKeyPress(.escape) { NSApp.terminate(nil); return .handled }
         .onKeyPress("i") { renderer.showInfo.toggle(); return .handled }
         .onKeyPress("0") { renderer.autoadvanceInterval = 0; return .handled }
         .onKeyPress("1") { renderer.autoadvanceInterval = 1; return .handled }
@@ -72,11 +71,6 @@ class MetalNSView: NSView {
         layer = metalLayer
     }
 
-    override func viewDidMoveToWindow() {
-        super.viewDidMoveToWindow()
-        updateDrawableSize()
-    }
-
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
         updateDrawableSize()
@@ -98,8 +92,7 @@ struct MetalViewRepresentable: NSViewRepresentable {
 
     func makeNSView(context: Context) -> MetalNSView {
         let view = MetalNSView()
-        view.metalLayer.device = MTLCreateSystemDefaultDevice()!
-        view.metalLayer.pixelFormat = .bgra8Unorm
+        view.metalLayer.device = MTLCreateSystemDefaultDevice()
         view.metalLayer.framebufferOnly = false
         view.renderer = context.coordinator
         context.coordinator.metalLayer = view.metalLayer
@@ -282,16 +275,6 @@ class Renderer: NSObject, ObservableObject {
     
     func draw() {
         guard !imagePaths.isEmpty, let pipeline = pipeline else { return }
-        if isDrawing {
-            needsRedraw = true
-            return
-        }
-        isDrawing = true
-        needsRedraw = false
-        defer {
-            isDrawing = false
-            if needsRedraw { draw() }
-        }
 
         if textureDirty {
             textureDirty = false

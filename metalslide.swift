@@ -91,6 +91,7 @@ struct MetalViewRepresentable: NSViewRepresentable {
     func makeNSView(context: Context) -> MTKView {
         let view = MTKView()
         view.device = MTLCreateSystemDefaultDevice()
+        view.framebufferOnly = false
         view.delegate = context.coordinator
         view.isPaused = true
         view.enableSetNeedsDisplay = true

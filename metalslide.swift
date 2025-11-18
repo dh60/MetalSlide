@@ -40,10 +40,19 @@ struct MetalView: View {
         
         .focusable()
         .focusEffectDisabled()
+        .onMoveCommand { direction in
+            switch direction {
+            case .left, .up:
+                renderer.goToSlide(renderer.currentIndex - 1)
+            case .right, .down:
+                renderer.goToSlide(renderer.currentIndex + 1)
+            default:
+                break
+            }
+        }
         .onKeyPress(.space) { renderer.goToSlide(renderer.currentIndex + 1); return .handled }
-        .onKeyPress(.leftArrow) { renderer.goToSlide(renderer.currentIndex - 1); return .handled }
-        .onKeyPress(.rightArrow) { renderer.goToSlide(renderer.currentIndex + 1); return .handled }
-        .onKeyPress(.delete) { renderer.deleteSlide(); return .handled }
+        .onDeleteCommand { renderer.deleteSlide() }
+        .onExitCommand { NSApplication.shared.terminate(nil) }
         .onKeyPress("i") { renderer.showInfo.toggle(); return .handled }
         .onKeyPress("0") { renderer.autoadvanceInterval = 0; return .handled }
         .onKeyPress("1") { renderer.autoadvanceInterval = 1; return .handled }

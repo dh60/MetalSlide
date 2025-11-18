@@ -15,7 +15,7 @@ struct MetalSlide: App {
 
 struct MetalView: View {
     @StateObject private var renderer = Renderer()
-    @State private var isImporting: Bool = true
+    @State private var isImporting = true
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -72,7 +72,6 @@ struct MetalView: View {
         ) { result in
             let urls = try! result.get()
             let url = urls.first!
-
             renderer.imagePaths = FileManager.default
                 .enumerator(at: url, includingPropertiesForKeys: nil)!
                 .allObjects

@@ -5,7 +5,7 @@ rm -rf MetalSlide.app
 mkdir -p MetalSlide.app/Contents/MacOS
 
 # Compile the Swift code
-swiftc MetalSlide.swift -o MetalSlide.app/Contents/MacOS/MetalSlide -framework SwiftUI -framework Metal -framework MetalKit -framework MetalFX -parse-as-library
+swiftc MetalSlide.swift -o MetalSlide.app/Contents/MacOS/MetalSlide -framework SwiftUI -framework Metal -framework MetalFX -parse-as-library
 
 # Create Info.plist
 cat << EOF > MetalSlide.app/Contents/Info.plist

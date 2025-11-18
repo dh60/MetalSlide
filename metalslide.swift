@@ -1,7 +1,7 @@
 import SwiftUI
 import Metal
+import MetalKit
 import MetalFX
-import UniformTypeIdentifiers
 
 @main
 struct MetalSlide: App {
@@ -15,7 +15,7 @@ struct MetalSlide: App {
 
 struct MetalView: View {
     @StateObject private var renderer = Renderer()
-    @State private var isImporting: Bool = true // State to trigger fileImporter
+    @State private var isImporting: Bool = true
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -27,8 +27,8 @@ struct MetalView: View {
                     Text(renderer.info)
 
                     Toggle("Scaling", isOn: $renderer.scalingEnabled)
-                        .onChange(of: renderer.scalingEnabled) { renderer.draw() }
-
+                        .onChange(of: renderer.scalingEnabled) { renderer.view?.needsDisplay = true }
+                    
                     Toggle("Shuffle", isOn: $renderer.shuffleEnabled)
                         .onChange(of: renderer.shuffleEnabled) { renderer.toggleShuffle() }
                 }
@@ -37,12 +37,13 @@ struct MetalView: View {
                 .padding(.leading, 8)
             }
         }
+        
         .focusable()
         .focusEffectDisabled()
         .onKeyPress(.space) { renderer.goToSlide(renderer.currentIndex + 1); return .handled }
         .onKeyPress(.leftArrow) { renderer.goToSlide(renderer.currentIndex - 1); return .handled }
         .onKeyPress(.rightArrow) { renderer.goToSlide(renderer.currentIndex + 1); return .handled }
-        .onKeyPress(.delete) { renderer.deleteCurrentSlide(); return .handled }
+        .onKeyPress(.delete) { renderer.deleteSlide(); return .handled }
         .onKeyPress("i") { renderer.showInfo.toggle(); return .handled }
         .onKeyPress("0") { renderer.autoadvanceInterval = 0; return .handled }
         .onKeyPress("1") { renderer.autoadvanceInterval = 1; return .handled }
@@ -54,6 +55,7 @@ struct MetalView: View {
         .onKeyPress("7") { renderer.autoadvanceInterval = 7; return .handled }
         .onKeyPress("8") { renderer.autoadvanceInterval = 8; return .handled }
         .onKeyPress("9") { renderer.autoadvanceInterval = 9; return .handled }
+        
         .fileImporter(
             isPresented: $isImporting,
             allowedContentTypes: [.directory],
@@ -68,39 +70,8 @@ struct MetalView: View {
                 .compactMap { $0 as? URL }
                 .filter { ["jpg", "jpeg", "png"].contains($0.pathExtension.lowercased()) }
                 .sorted { $0.path < $1.path }
-
-            renderer.draw()
+            renderer.view?.needsDisplay = true
         }
-    }
-}
-
-class MetalNSView: NSView {
-    var renderer: Renderer?
-    let metalLayer = CAMetalLayer()
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        wantsLayer = true
-        layer = metalLayer
-    }
-
-    required init?(coder: NSCoder) {
-        super.init(coder: coder)
-        wantsLayer = true
-        layer = metalLayer
-    }
-
-    override func setFrameSize(_ newSize: NSSize) {
-        super.setFrameSize(newSize)
-        updateDrawableSize()
-    }
-
-    func updateDrawableSize() {
-        guard let window = window else { return }
-        let scale = window.backingScaleFactor
-        let size = bounds.size
-        metalLayer.drawableSize = CGSize(width: size.width * scale, height: size.height * scale)
-        renderer?.draw()
     }
 }
 
@@ -109,13 +80,13 @@ struct MetalViewRepresentable: NSViewRepresentable {
 
     func makeCoordinator() -> Renderer { renderer }
 
-    func makeNSView(context: Context) -> MetalNSView {
-        let view = MetalNSView()
-        view.metalLayer.device = MTLCreateSystemDefaultDevice()
-        view.metalLayer.framebufferOnly = false
-        view.renderer = context.coordinator
-        context.coordinator.metalLayer = view.metalLayer
-        context.coordinator.initializeMetal()
+    func makeNSView(context: Context) -> MTKView {
+        let view = MTKView()
+        view.device = MTLCreateSystemDefaultDevice()
+        view.delegate = context.coordinator
+        view.isPaused = true
+        view.enableSetNeedsDisplay = true
+        context.coordinator.view = view
 
         Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
             let r = context.coordinator
@@ -123,14 +94,13 @@ struct MetalViewRepresentable: NSViewRepresentable {
                 r.goToSlide(r.currentIndex + 1)
             }
         }
-
         return view
     }
 
-    func updateNSView(_ nsView: MetalNSView, context: Context) {}
+    func updateNSView(_ nsView: MTKView, context: Context) {}
 }
 
-class Renderer: NSObject, ObservableObject {
+class Renderer: NSObject, MTKViewDelegate, ObservableObject {
     var imagePaths: [URL] = []
     var currentIndex = 0
     var textureDirty = true
@@ -142,13 +112,11 @@ class Renderer: NSObject, ObservableObject {
     var argumentTable: MTL4ArgumentTable!
     var residencySet: MTLResidencySet!
     var texture: MTLTexture?
-    var metalLayer: CAMetalLayer!
-
+    weak var view: MTKView?
+    
     var scaleBuffer: MTLBuffer!
     var compiler: MTL4Compiler!
-    var scaler: MTL4FXSpatialScaler?
-    var scalerOutputTexture: MTLTexture?
-    var cachedScalerSize: CGSize?
+    var scaler: (MTL4FXSpatialScaler, MTLTexture)?
     var scalerFence: MTLFence!
     var commandBuffer: MTL4CommandBuffer!
 
@@ -159,44 +127,9 @@ class Renderer: NSObject, ObservableObject {
 
     var autoadvanceInterval = 0
     var slideChangedTime = Date()
-    var isDrawing = false
-    var needsRedraw = false
-    
-    func loadTexture(from url: URL) -> MTLTexture? {
-        guard let image = NSImage(contentsOf: url),
-              let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
 
-        let textureDesc = MTLTextureDescriptor.texture2DDescriptor(
-            pixelFormat: .rgba8Unorm,
-            width: cgImage.width,
-            height: cgImage.height,
-            mipmapped: false)
-        textureDesc.usage = [.shaderRead]
-
-        guard let texture = device.makeTexture(descriptor: textureDesc) else { return nil }
-
-        let context = CGContext(
-            data: nil,
-            width: cgImage.width,
-            height: cgImage.height,
-            bitsPerComponent: 8,
-            bytesPerRow: cgImage.width * 4,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
-
-        context.draw(cgImage, in: CGRect(x: 0, y: 0, width: cgImage.width, height: cgImage.height))
-
-        texture.replace(
-            region: MTLRegionMake2D(0, 0, cgImage.width, cgImage.height),
-            mipmapLevel: 0,
-            withBytes: context.data!,
-            bytesPerRow: cgImage.width * 4)
-
-        return texture
-    }
-
-    func initializeMetal() {
-        device = metalLayer.device
+    func initializeMetal(_ view: MTKView) {
+        device = view.device
         queue = device.makeMTL4CommandQueue()
         compiler = try! device.makeCompiler(descriptor: MTL4CompilerDescriptor())
 
@@ -245,7 +178,7 @@ class Renderer: NSObject, ObservableObject {
                 print("Shader compilation error: \(error?.localizedDescription ?? "unknown")")
                 return
             }
-
+            
             let desc = MTL4RenderPipelineDescriptor()
             desc.vertexFunctionDescriptor = {
                 let d = MTL4LibraryFunctionDescriptor()
@@ -259,30 +192,35 @@ class Renderer: NSObject, ObservableObject {
                 d.library = library
                 return d
             }()
-            desc.colorAttachments[0].pixelFormat = self.metalLayer.pixelFormat
-
+            desc.colorAttachments[0].pixelFormat = view.colorPixelFormat
+            
             Task {
-                do {
-                    self.pipeline = try await self.compiler.makeRenderPipelineState(descriptor: desc)
-                    self.draw()
-                } catch {
-                    print("Pipeline creation error: \(error)")
-                }
+                self.pipeline = try await self.compiler.makeRenderPipelineState(descriptor: desc)
+                await MainActor.run { self.view?.needsDisplay = true }
             }
         }
     }
     
-    func draw() {
-        guard !imagePaths.isEmpty, let pipeline = pipeline else { return }
-
+    func draw(in view: MTKView) {
+        guard !imagePaths.isEmpty else { return }
+        
+        if pipeline == nil {
+            initializeMetal(view)
+            return
+        }
+        
         if textureDirty {
             textureDirty = false
-            texture = loadTexture(from: imagePaths[currentIndex])
+            texture = try? MTKTextureLoader(device: device).newTexture(
+                URL: imagePaths[currentIndex],
+                options: [
+                    .SRGB: false
+                ])
         }
-
-        guard let inputTexture = texture,
-              let drawable = metalLayer.nextDrawable() else { return }
-
+        
+        guard let drawable = view.currentDrawable,
+              let inputTexture = texture else { return }
+        
         let viewportSize = CGSize(width: drawable.texture.width,
                                  height: drawable.texture.height)
         
@@ -297,13 +235,15 @@ class Renderer: NSObject, ObservableObject {
         
         let displaySize = scalingEnabled ? fitSize : CGSize(width: inputTexture.width,
                                                           height: inputTexture.height)
-
+        
         var scalingMode = ""
-        let needsUpscale = scalingEnabled && (Int(fitSize.width) > inputTexture.width ||
-                                               Int(fitSize.height) > inputTexture.height)
-
-        if needsUpscale {
-            if cachedScalerSize != fitSize || scaler == nil {
+        scaler = nil
+        
+        if scalingEnabled {
+            let needsUpscale = Int(fitSize.width) > inputTexture.width ||
+                              Int(fitSize.height) > inputTexture.height
+            
+            if needsUpscale && MTLFXSpatialScalerDescriptor.supportsDevice(device) {
                 let desc = MTLFXSpatialScalerDescriptor()
                 desc.inputWidth = inputTexture.width
                 desc.inputHeight = inputTexture.height
@@ -312,7 +252,7 @@ class Renderer: NSObject, ObservableObject {
                 desc.colorTextureFormat = .rgba8Unorm
                 desc.outputTextureFormat = .rgba8Unorm
                 desc.colorProcessingMode = .perceptual
-
+                
                 if let s = desc.makeSpatialScaler(device: device, compiler: compiler) {
                     s.fence = scalerFence
                     let outDesc = MTLTextureDescriptor.texture2DDescriptor(
@@ -321,23 +261,15 @@ class Renderer: NSObject, ObservableObject {
                         height: Int(fitSize.height),
                         mipmapped: false)
                     outDesc.usage = s.outputTextureUsage
-                    outDesc.storageMode = .private
-                    scaler = s
-                    scalerOutputTexture = device.makeTexture(descriptor: outDesc)
-                    cachedScalerSize = fitSize
+                    scaler = (s, device.makeTexture(descriptor: outDesc)!)
                 }
-            }
-            scalingMode = "\nUpscaling: MetalFX"
-        } else {
-            scaler = nil
-            scalerOutputTexture = nil
-            cachedScalerSize = nil
-            if scalingEnabled {
+                scalingMode = "\nUpscaling: MetalFX"
+            } else {
                 scalingMode = "\nDownscaling: Linear"
             }
         }
-
-        if let s = scaler, let output = scalerOutputTexture {
+        
+        if let (s, output) = scaler {
             s.colorTexture = inputTexture
             s.outputTexture = output
             s.inputContentWidth = inputTexture.width
@@ -359,30 +291,24 @@ class Renderer: NSObject, ObservableObject {
         residencySet.removeAllAllocations()
         residencySet.addAllocation(inputTexture)
         residencySet.addAllocation(scaleBuffer)
-        if let output = scalerOutputTexture { residencySet.addAllocation(output) }
+        if let (_, output) = scaler { residencySet.addAllocation(output) }
         residencySet.commit()
-
-        let finalTexture = scalerOutputTexture ?? inputTexture
+        
+        let finalTexture = scaler?.1 ?? inputTexture
         
         argumentTable.setTexture(finalTexture.gpuResourceID, index: 0)
         argumentTable.setAddress(scaleBuffer.gpuAddress, index: 0)
         
-        let passDesc = MTL4RenderPassDescriptor()
-        passDesc.colorAttachments[0].texture = drawable.texture
-        passDesc.colorAttachments[0].loadAction = .clear
-        passDesc.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
-        passDesc.colorAttachments[0].storeAction = .store
-
         commandBuffer.beginCommandBuffer(allocator: allocator)
         commandBuffer.useResidencySet(residencySet)
-        scaler?.encode(commandBuffer: commandBuffer)
-
-        let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: passDesc)!
-
-        if scaler != nil {
-            encoder.waitForFence(scalerFence, beforeEncoderStages: .fragment)
-        }
-        encoder.setRenderPipelineState(pipeline)
+        scaler?.0.encode(commandBuffer: commandBuffer)
+        
+        let encoder = commandBuffer.makeRenderCommandEncoder(
+            descriptor: view.currentMTL4RenderPassDescriptor!,
+            options: MTL4RenderEncoderOptions())!
+        
+        encoder.waitForFence(scalerFence, beforeEncoderStages: .fragment)
+        encoder.setRenderPipelineState(pipeline!)
         encoder.setArgumentTable(argumentTable, stages: [.vertex, .fragment])
         encoder.drawPrimitives(primitiveType: .triangle, vertexStart: 0, vertexCount: 6)
         encoder.endEncoding()
@@ -393,12 +319,15 @@ class Renderer: NSObject, ObservableObject {
         queue.commit([commandBuffer])
         queue.signalDrawable(drawable)
         drawable.present()
-
+        
         allocator.reset()
     }
 
-    func deleteCurrentSlide() {
-        guard !imagePaths.isEmpty else { return }
+    func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
+        view.needsDisplay = true
+    }
+    
+    func deleteSlide() {
         try? FileManager.default.trashItem(at: imagePaths[currentIndex], resultingItemURL: nil)
         imagePaths.remove(at: currentIndex)
         goToSlide(currentIndex)
@@ -408,7 +337,7 @@ class Renderer: NSObject, ObservableObject {
         currentIndex = (index % imagePaths.count + imagePaths.count) % imagePaths.count
         textureDirty = true
         slideChangedTime = Date()
-        draw()
+        view?.needsDisplay = true
     }
     
     func toggleShuffle() {

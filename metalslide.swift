@@ -1,6 +1,7 @@
 import SwiftUI
 import Metal
 import MetalFX
+import UniformTypeIdentifiers
 
 @main
 struct MetalSlide: App {
@@ -14,6 +15,7 @@ struct MetalSlide: App {
 
 struct MetalView: View {
     @StateObject private var renderer = Renderer()
+    @State private var isImporting: Bool = true // State to trigger fileImporter
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -52,6 +54,23 @@ struct MetalView: View {
         .onKeyPress("7") { renderer.autoadvanceInterval = 7; return .handled }
         .onKeyPress("8") { renderer.autoadvanceInterval = 8; return .handled }
         .onKeyPress("9") { renderer.autoadvanceInterval = 9; return .handled }
+        .fileImporter(
+            isPresented: $isImporting,
+            allowedContentTypes: [.directory],
+            allowsMultipleSelection: false
+        ) { result in
+            let urls = try! result.get()
+            let url = urls.first!
+
+            renderer.imagePaths = FileManager.default
+                .enumerator(at: url, includingPropertiesForKeys: nil)!
+                .allObjects
+                .compactMap { $0 as? URL }
+                .filter { ["jpg", "jpeg", "png"].contains($0.pathExtension.lowercased()) }
+                .sorted { $0.path < $1.path }
+
+            renderer.draw()
+        }
     }
 }
 
@@ -98,26 +117,6 @@ struct MetalViewRepresentable: NSViewRepresentable {
         context.coordinator.metalLayer = view.metalLayer
         context.coordinator.initializeMetal()
 
-        DispatchQueue.main.async {
-            let panel = NSOpenPanel()
-            panel.canChooseDirectories = true
-            panel.canChooseFiles = false
-
-            guard panel.runModal() == .OK, let url = panel.url else {
-                NSApp.terminate(nil)
-                return
-            }
-
-            context.coordinator.imagePaths = FileManager.default
-                .enumerator(at: url, includingPropertiesForKeys: nil)!
-                .allObjects
-                .compactMap { $0 as? URL }
-                .filter { ["jpg", "jpeg", "png"].contains($0.pathExtension.lowercased()) }
-                .shuffled()
-
-            context.coordinator.draw()
-        }
-
         Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { _ in
             let r = context.coordinator
             if r.autoadvanceInterval > 0 && Date().timeIntervalSince(r.slideChangedTime) >= Double(r.autoadvanceInterval) {
@@ -156,7 +155,7 @@ class Renderer: NSObject, ObservableObject {
     @Published var info = ""
     @Published var showInfo = false
     @Published var scalingEnabled = true
-    @Published var shuffleEnabled = true
+    @Published var shuffleEnabled = false
 
     var autoadvanceInterval = 0
     var slideChangedTime = Date()
